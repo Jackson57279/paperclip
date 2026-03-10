@@ -2,6 +2,9 @@
 
 Guidance for human and AI contributors working in this repository.
 
+**Generated:** 2026-03-09
+**Stack:** Express REST API, React + Vite UI, Drizzle ORM, PostgreSQL
+
 ## 1. Purpose
 
 Paperclip is a control plane for AI-agent companies.
