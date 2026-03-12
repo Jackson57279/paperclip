@@ -45,6 +45,30 @@ import {
 import {
   agentConfigurationDoc as piAgentConfigurationDoc,
 } from "@paperclipai/adapter-pi-local";
+import {
+  execute as ampExecute,
+  testEnvironment as ampTestEnvironment,
+  sessionCodec as ampSessionCodec,
+} from "@paperclipai/adapter-amp-local/server";
+import { agentConfigurationDoc as ampAgentConfigurationDoc, models as ampModels } from "@paperclipai/adapter-amp-local";
+import {
+  execute as geminiExecute,
+  testEnvironment as geminiTestEnvironment,
+  sessionCodec as geminiSessionCodec,
+} from "@paperclipai/adapter-gemini-local/server";
+import { agentConfigurationDoc as geminiAgentConfigurationDoc, models as geminiModels } from "@paperclipai/adapter-gemini-local";
+import {
+  execute as copilotExecute,
+  testEnvironment as copilotTestEnvironment,
+  sessionCodec as copilotSessionCodec,
+} from "@paperclipai/adapter-copilot-local/server";
+import { agentConfigurationDoc as copilotAgentConfigurationDoc, models as copilotModels } from "@paperclipai/adapter-copilot-local";
+import {
+  execute as kimiExecute,
+  testEnvironment as kimiTestEnvironment,
+  sessionCodec as kimiSessionCodec,
+} from "@paperclipai/adapter-kimi-local/server";
+import { agentConfigurationDoc as kimiAgentConfigurationDoc, models as kimiModels } from "@paperclipai/adapter-kimi-local";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
 
@@ -111,6 +135,46 @@ const piLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: piAgentConfigurationDoc,
 };
 
+const ampLocalAdapter: ServerAdapterModule = {
+  type: "amp_local",
+  execute: ampExecute,
+  testEnvironment: ampTestEnvironment,
+  sessionCodec: ampSessionCodec,
+  models: ampModels,
+  supportsLocalAgentJwt: true,
+  agentConfigurationDoc: ampAgentConfigurationDoc,
+};
+
+const geminiLocalAdapter: ServerAdapterModule = {
+  type: "gemini_local",
+  execute: geminiExecute,
+  testEnvironment: geminiTestEnvironment,
+  sessionCodec: geminiSessionCodec,
+  models: geminiModels,
+  supportsLocalAgentJwt: true,
+  agentConfigurationDoc: geminiAgentConfigurationDoc,
+};
+
+const copilotLocalAdapter: ServerAdapterModule = {
+  type: "copilot_local",
+  execute: copilotExecute,
+  testEnvironment: copilotTestEnvironment,
+  sessionCodec: copilotSessionCodec,
+  models: copilotModels,
+  supportsLocalAgentJwt: true,
+  agentConfigurationDoc: copilotAgentConfigurationDoc,
+};
+
+const kimiLocalAdapter: ServerAdapterModule = {
+  type: "kimi_local",
+  execute: kimiExecute,
+  testEnvironment: kimiTestEnvironment,
+  sessionCodec: kimiSessionCodec,
+  models: kimiModels,
+  supportsLocalAgentJwt: true,
+  agentConfigurationDoc: kimiAgentConfigurationDoc,
+};
+
 const adaptersByType = new Map<string, ServerAdapterModule>(
   [
     claudeLocalAdapter,
@@ -119,6 +183,10 @@ const adaptersByType = new Map<string, ServerAdapterModule>(
     piLocalAdapter,
     cursorLocalAdapter,
     openclawGatewayAdapter,
+    ampLocalAdapter,
+    geminiLocalAdapter,
+    copilotLocalAdapter,
+    kimiLocalAdapter,
     processAdapter,
     httpAdapter,
   ].map((a) => [a.type, a]),

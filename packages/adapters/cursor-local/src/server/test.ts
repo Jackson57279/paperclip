@@ -10,12 +10,11 @@ import {
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
-  runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import path from "node:path";
-import { DEFAULT_CURSOR_LOCAL_MODEL } from "../index.js";
 import { parseCursorJsonl } from "./parse.js";
 import { hasCursorTrustBypassArg } from "../shared/trust.js";
+import { AcpClient, runAcpSession } from "./acp.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -129,43 +128,74 @@ export async function testEnvironment(
         hint: "Use the `agent` CLI command to run the automatic installation and auth probe.",
       });
     } else {
-      const model = asString(config.model, DEFAULT_CURSOR_LOCAL_MODEL).trim();
       const extraArgs = (() => {
         const fromExtraArgs = asStringArray(config.extraArgs);
         if (fromExtraArgs.length > 0) return fromExtraArgs;
         return asStringArray(config.args);
       })();
       const autoTrustEnabled = !hasCursorTrustBypassArg(extraArgs);
-      const args = ["-p", "--mode", "ask", "--output-format", "json", "--workspace", cwd];
-      if (model) args.push("--model", model);
-      if (autoTrustEnabled) args.push("--yolo");
-      if (extraArgs.length > 0) args.push(...extraArgs);
-      args.push("Respond with hello.");
 
-      const probe = await runChildProcess(
-        `cursor-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      // Run hello probe via ACP
+      const collectedLines: string[] = [];
+      const stderrChunks: string[] = [];
+      const client = new AcpClient({
         command,
-        args,
-        {
-          cwd,
-          env,
-          timeoutSec: 45,
-          graceSec: 5,
-          onLog: async () => {},
-        },
-      );
-      const parsed = parseCursorJsonl(probe.stdout);
-      const detail = summarizeProbeDetail(probe.stdout, probe.stderr, parsed.errorMessage);
-      const authEvidence = `${parsed.errorMessage ?? ""}\n${probe.stdout}\n${probe.stderr}`.trim();
+        cwd,
+        env,
+        onStreamLine: async (line) => { collectedLines.push(line); },
+        onStderr: async (chunk) => { stderrChunks.push(chunk); },
+        yolo: autoTrustEnabled,
+        timeoutSec: 45,
+        graceSec: 5,
+      });
 
-      if (probe.timedOut) {
+      let probeTimedOut = false;
+      let probeExitCode: number | null = null;
+      let probeError: string | null = null;
+
+      try {
+        client.spawn();
+        const timeoutHandle = setTimeout(() => {
+          probeTimedOut = true;
+          client.kill("SIGTERM");
+        }, 45_000);
+
+        try {
+          await runAcpSession({
+            client,
+            prompt: "Say hello in one sentence.",
+            sessionId: null,
+            cwd,
+            yolo: autoTrustEnabled,
+            onStreamLine: async (line) => { collectedLines.push(line); },
+            onLog: async () => {},
+            timeoutSec: 45,
+          });
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
+      } catch (err) {
+        probeError = err instanceof Error ? err.message : String(err);
+      }
+
+      if (!client.isClosed) client.kill("SIGTERM");
+      const exitResult = await client.waitForExit();
+      probeExitCode = exitResult.exitCode;
+
+      const probeStdout = collectedLines.join("\n");
+      const probeStderr = stderrChunks.join("");
+      const parsed = parseCursorJsonl(probeStdout);
+      const detail = summarizeProbeDetail(probeStdout, probeStderr, parsed.errorMessage ?? probeError);
+      const authEvidence = `${parsed.errorMessage ?? ""}\n${probeError ?? ""}\n${probeStdout}\n${probeStderr}`.trim();
+
+      if (probeTimedOut) {
         checks.push({
           code: "cursor_hello_probe_timed_out",
           level: "warn",
           message: "Cursor hello probe timed out.",
-          hint: "Retry the probe. If this persists, verify `agent -p --mode ask --output-format json \"Respond with hello.\"` manually.",
+          hint: "Retry the probe. If this persists, verify `agent acp` manually.",
         });
-      } else if ((probe.exitCode ?? 1) === 0) {
+      } else if ((probeExitCode ?? 1) === 0 && !probeError) {
         const summary = parsed.summary.trim();
         const hasHello = /\bhello\b/i.test(summary);
         checks.push({
@@ -178,7 +208,7 @@ export async function testEnvironment(
           ...(hasHello
             ? {}
             : {
-                hint: "Try `agent -p --mode ask --output-format json \"Respond with hello.\"` manually to inspect full output.",
+                hint: "Try running `agent acp` manually to inspect full output.",
               }),
         });
       } else if (CURSOR_AUTH_REQUIRED_RE.test(authEvidence)) {
@@ -195,7 +225,7 @@ export async function testEnvironment(
           level: "error",
           message: "Cursor hello probe failed.",
           ...(detail ? { detail } : {}),
-          hint: "Run `agent -p --mode ask --output-format json \"Respond with hello.\"` manually in this working directory to debug.",
+          hint: "Run `agent acp` manually in this working directory to debug.",
         });
       }
     }

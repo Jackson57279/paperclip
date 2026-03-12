@@ -5,6 +5,10 @@ import { cursorLocalUIAdapter } from "./cursor";
 import { openCodeLocalUIAdapter } from "./opencode-local";
 import { piLocalUIAdapter } from "./pi-local";
 import { openClawGatewayUIAdapter } from "./openclaw-gateway";
+import { ampLocalUIAdapter } from "./amp-local";
+import { geminiLocalUIAdapter } from "./gemini-local";
+import { copilotLocalUIAdapter } from "./copilot-local";
+import { kimiLocalUIAdapter } from "./kimi-local";
 import { processUIAdapter } from "./process";
 import { httpUIAdapter } from "./http";
 
@@ -16,6 +20,10 @@ const adaptersByType = new Map<string, UIAdapterModule>(
     piLocalUIAdapter,
     cursorLocalUIAdapter,
     openClawGatewayUIAdapter,
+    ampLocalUIAdapter,
+    geminiLocalUIAdapter,
+    copilotLocalUIAdapter,
+    kimiLocalUIAdapter,
     processUIAdapter,
     httpUIAdapter,
   ].map((a) => [a.type, a]),

@@ -15,12 +15,11 @@ import {
   ensureCommandResolvable,
   ensurePathInEnv,
   renderTemplate,
-  runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "../index.js";
 import { parseCursorJsonl, isCursorUnknownSessionError } from "./parse.js";
-import { normalizeCursorStreamLine } from "../shared/stream.js";
 import { hasCursorTrustBypassArg } from "../shared/trust.js";
+import { AcpClient, runAcpSession } from "./acp.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_SKILLS_CANDIDATES = [
@@ -299,9 +298,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const commandNotes = (() => {
     const notes: string[] = [];
     if (autoTrustEnabled) {
-      notes.push("Auto-added --yolo to bypass interactive prompts.");
+      notes.push("Auto-trust enabled for permission requests.");
     }
-    notes.push("Prompt is piped to Cursor via stdin.");
+    notes.push("Prompt is sent via ACP session/prompt.");
     if (!instructionsFilePath) return notes;
     if (instructionsPrefix.length > 0) {
       notes.push(
@@ -328,78 +327,87 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const paperclipEnvNote = renderPaperclipEnvNote(env);
   const prompt = `${instructionsPrefix}${paperclipEnvNote}${renderedPrompt}`;
 
-  const buildArgs = (resumeSessionId: string | null) => {
-    const args = ["-p", "--output-format", "stream-json", "--workspace", cwd];
-    if (resumeSessionId) args.push("--resume", resumeSessionId);
-    if (model) args.push("--model", model);
-    if (mode) args.push("--mode", mode);
-    if (autoTrustEnabled) args.push("--yolo");
-    if (extraArgs.length > 0) args.push(...extraArgs);
-    return args;
-  };
-
-  const runAttempt = async (resumeSessionId: string | null) => {
-    const args = buildArgs(resumeSessionId);
-    if (onMeta) {
-      await onMeta({
-        adapterType: "cursor",
-        command,
-        cwd,
-        commandNotes,
-        commandArgs: args,
-        env: redactEnvForLogs(env),
-        prompt,
-        context,
-      });
-    }
-
-    let stdoutLineBuffer = "";
-    const emitNormalizedStdoutLine = async (rawLine: string) => {
-      const normalized = normalizeCursorStreamLine(rawLine);
-      if (!normalized.line) return;
-      await onLog(normalized.stream ?? "stdout", `${normalized.line}\n`);
-    };
-    const flushStdoutChunk = async (chunk: string, finalize = false) => {
-      const combined = `${stdoutLineBuffer}${chunk}`;
-      const lines = combined.split(/\r?\n/);
-      stdoutLineBuffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        await emitNormalizedStdoutLine(line);
-      }
-
-      if (finalize) {
-        const trailing = stdoutLineBuffer.trim();
-        stdoutLineBuffer = "";
-        if (trailing) {
-          await emitNormalizedStdoutLine(trailing);
-        }
-      }
-    };
-
-    const proc = await runChildProcess(runId, command, args, {
+  const acpArgs = ["acp"];
+  if (onMeta) {
+    await onMeta({
+      adapterType: "cursor",
+      command,
       cwd,
-      env,
-      timeoutSec,
-      graceSec,
-      stdin: prompt,
-      onLog: async (stream, chunk) => {
-        if (stream !== "stdout") {
-          await onLog(stream, chunk);
-          return;
-        }
-        await flushStdoutChunk(chunk);
-      },
+      commandNotes,
+      commandArgs: acpArgs,
+      env: redactEnvForLogs(env),
+      prompt,
+      context,
     });
-    await flushStdoutChunk("", true);
-
-    return {
-      proc,
-      parsed: parseCursorJsonl(proc.stdout),
-    };
-  };
+  }
 
   const providerFromModel = resolveProviderFromModel(model);
+
+  // Collected stream-json lines emitted by the ACP translator, used to build
+  // the same stdout blob that parseCursorJsonl expects.
+  const collectedStdoutLines: string[] = [];
+
+  const runAcpAttempt = async (resumeSessionId: string | null): Promise<{
+    proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string };
+    parsed: ReturnType<typeof parseCursorJsonl>;
+  }> => {
+    const client = new AcpClient({
+      command,
+      cwd,
+      env,
+      onStreamLine: async (line) => {
+        collectedStdoutLines.push(line);
+        await onLog("stdout", `${line}\n`);
+      },
+      onStderr: async (chunk) => {
+        await onLog("stderr", chunk);
+      },
+      yolo: autoTrustEnabled,
+      timeoutSec,
+      graceSec,
+    });
+
+    const child = client.spawn();
+    let timedOut = false;
+
+    try {
+      await runAcpSession({
+        client,
+        prompt,
+        sessionId: resumeSessionId,
+        cwd,
+        yolo: autoTrustEnabled,
+        onStreamLine: async (line) => {
+          collectedStdoutLines.push(line);
+          await onLog("stdout", `${line}\n`);
+        },
+        onLog,
+        timeoutSec,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await onLog("stderr", `[paperclip] ACP error: ${message}\n`);
+    }
+
+    // Ensure process exits
+    if (!client.isClosed) {
+      client.kill("SIGTERM");
+    }
+    const exitResult = await client.waitForExit();
+    const stdout = collectedStdoutLines.join("\n");
+    const stderr = client.getStderr();
+
+    return {
+      proc: {
+        exitCode: exitResult.exitCode,
+        signal: exitResult.signal,
+        timedOut,
+        stdout,
+        stderr,
+      },
+      parsed: parseCursorJsonl(stdout),
+    };
+  };
 
   const toResult = (
     attempt: {
@@ -466,7 +474,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
-  const initial = await runAttempt(sessionId);
+  const initial = await runAcpAttempt(sessionId);
   if (
     sessionId &&
     !initial.proc.timedOut &&
@@ -477,7 +485,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       "stderr",
       `[paperclip] Cursor resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
     );
-    const retry = await runAttempt(null);
+    collectedStdoutLines.length = 0;
+    const retry = await runAcpAttempt(null);
     return toResult(retry, true);
   }
 
