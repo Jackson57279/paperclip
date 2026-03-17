@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, Link, Navigate, useBeforeUnload } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { agentsApi, type AgentKey, type ClaudeLoginResult } from "../api/agents";
+import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { ApiError } from "../api/client";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
@@ -24,8 +25,9 @@ import { CopyText } from "../components/CopyText";
 import { EntityRow } from "../components/EntityRow";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { ScrollToBottom } from "../components/ScrollToBottom";
-import { formatCents, formatDate, relativeTime, formatTokens } from "../lib/utils";
+import { formatCents, formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { cn } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Tabs } from "@/components/ui/tabs";
@@ -58,7 +60,16 @@ import {
 import { Input } from "@/components/ui/input";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
-import { isUuidLike, type Agent, type HeartbeatRun, type HeartbeatRunEvent, type AgentRuntimeState, type LiveEvent } from "@paperclipai/shared";
+import {
+  isUuidLike,
+  type Agent,
+  type BudgetPolicySummary,
+  type HeartbeatRun,
+  type HeartbeatRunEvent,
+  type AgentRuntimeState,
+  type LiveEvent,
+} from "@paperclipai/shared";
+import { redactHomePathUserSegments, redactHomePathUserSegmentsInValue } from "@paperclipai/adapter-utils";
 import { agentRouteRef } from "../lib/utils";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
@@ -92,11 +103,11 @@ function redactEnvValue(key: string, value: unknown): string {
   }
   if (shouldRedactSecretValue(key, value)) return REDACTED_ENV_VALUE;
   if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return redactHomePathUserSegments(value);
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(redactHomePathUserSegmentsInValue(value));
   } catch {
-    return String(value);
+    return redactHomePathUserSegments(String(value));
   }
 }
 
@@ -174,10 +185,11 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "configuration" | "runs";
+type AgentDetailView = "dashboard" | "configuration" | "runs" | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "configure" || value === "configuration") return "configuration";
+  if (value === "budget") return "budget";
   if (value === "runs") return value;
   return "dashboard";
 }
@@ -203,8 +215,7 @@ function runMetrics(run: HeartbeatRun) {
     "cache_read_input_tokens",
   );
   const cost =
-    usageNumber(usage, "costUsd", "cost_usd", "total_cost_usd") ||
-    usageNumber(result, "total_cost_usd", "cost_usd", "costUsd");
+    visibleRunCostUsd(usage, result);
   return {
     input,
     output,
@@ -293,11 +304,50 @@ export function AgentDetail() {
     enabled: !!resolvedCompanyId,
   });
 
+  const { data: budgetOverview } = useQuery({
+    queryKey: queryKeys.budgets.overview(resolvedCompanyId ?? "__none__"),
+    queryFn: () => budgetsApi.overview(resolvedCompanyId!),
+    enabled: !!resolvedCompanyId,
+    refetchInterval: 30_000,
+    staleTime: 5_000,
+  });
+
   const assignedIssues = (allIssues ?? [])
     .filter((i) => i.assigneeAgentId === agent?.id)
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   const reportsToAgent = (allAgents ?? []).find((a) => a.id === agent?.reportsTo);
   const directReports = (allAgents ?? []).filter((a) => a.reportsTo === agent?.id && a.status !== "terminated");
+  const agentBudgetSummary = useMemo(() => {
+    const matched = budgetOverview?.policies.find(
+      (policy) => policy.scopeType === "agent" && policy.scopeId === (agent?.id ?? routeAgentRef),
+    );
+    if (matched) return matched;
+    const budgetMonthlyCents = agent?.budgetMonthlyCents ?? 0;
+    const spentMonthlyCents = agent?.spentMonthlyCents ?? 0;
+    return {
+      policyId: "",
+      companyId: resolvedCompanyId ?? "",
+      scopeType: "agent",
+      scopeId: agent?.id ?? routeAgentRef,
+      scopeName: agent?.name ?? "Agent",
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: budgetMonthlyCents,
+      observedAmount: spentMonthlyCents,
+      remainingAmount: Math.max(0, budgetMonthlyCents - spentMonthlyCents),
+      utilizationPercent:
+        budgetMonthlyCents > 0 ? Number(((spentMonthlyCents / budgetMonthlyCents) * 100).toFixed(2)) : 0,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: budgetMonthlyCents > 0,
+      status: budgetMonthlyCents > 0 && spentMonthlyCents >= budgetMonthlyCents ? "hard_stop" : "ok",
+      paused: agent?.status === "paused",
+      pauseReason: agent?.pauseReason ?? null,
+      windowStart: new Date(),
+      windowEnd: new Date(),
+    } satisfies BudgetPolicySummary;
+  }, [agent, budgetOverview?.policies, resolvedCompanyId, routeAgentRef]);
   const mobileLiveRun = useMemo(
     () => (heartbeats ?? []).find((r) => r.status === "running" || r.status === "queued") ?? null,
     [heartbeats],
@@ -316,7 +366,9 @@ export function AgentDetail() {
         ? "configuration"
         : activeView === "runs"
           ? "runs"
-          : "dashboard";
+          : activeView === "budget"
+            ? "budget"
+            : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
@@ -356,6 +408,24 @@ export function AgentDetail() {
     },
     onError: (err) => {
       setActionError(err instanceof Error ? err.message : "Action failed");
+    },
+  });
+
+  const budgetMutation = useMutation({
+    mutationFn: (amount: number) =>
+      budgetsApi.upsertPolicy(resolvedCompanyId!, {
+        scopeType: "agent",
+        scopeId: agent?.id ?? routeAgentRef,
+        amount,
+        windowKind: "calendar_month_utc",
+      }),
+    onSuccess: () => {
+      if (!resolvedCompanyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(resolvedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(resolvedCompanyId) });
     },
   });
 
@@ -415,6 +485,8 @@ export function AgentDetail() {
         crumbs.push({ label: "Configuration" });
       } else if (activeView === "runs") {
         crumbs.push({ label: "Runs" });
+      } else if (activeView === "budget") {
+        crumbs.push({ label: "Budget" });
       } else {
         crumbs.push({ label: "Dashboard" });
       }
@@ -571,6 +643,7 @@ export function AgentDetail() {
               { value: "dashboard", label: "Dashboard" },
               { value: "configuration", label: "Configuration" },
               { value: "runs", label: "Runs" },
+              { value: "budget", label: "Budget" },
             ]}
             value={activeView}
             onValueChange={(value) => navigate(`/agents/${canonicalAgentRef}/${value}`)}
@@ -676,6 +749,17 @@ export function AgentDetail() {
           adapterType={agent.adapterType}
         />
       )}
+
+      {activeView === "budget" && resolvedCompanyId ? (
+        <div className="max-w-3xl">
+          <BudgetPolicyCard
+            summary={agentBudgetSummary}
+            isSaving={budgetMutation.isPending}
+            onSave={(amount) => budgetMutation.mutate(amount)}
+            variant="plain"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -848,8 +932,8 @@ function CostsSection({
 }) {
   const runsWithCost = runs
     .filter((r) => {
-      const u = r.usageJson as Record<string, unknown> | null;
-      return u && (u.cost_usd || u.total_cost_usd || u.input_tokens);
+      const metrics = runMetrics(r);
+      return metrics.cost > 0 || metrics.input > 0 || metrics.output > 0 || metrics.cached > 0;
     })
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -891,16 +975,16 @@ function CostsSection({
             </thead>
             <tbody>
               {runsWithCost.slice(0, 10).map((run) => {
-                const u = run.usageJson as Record<string, unknown>;
+                const metrics = runMetrics(run);
                 return (
                   <tr key={run.id} className="border-b border-border last:border-b-0">
                     <td className="px-3 py-2">{formatDate(run.createdAt)}</td>
                     <td className="px-3 py-2 font-mono">{run.id.slice(0, 8)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(Number(u.input_tokens ?? 0))}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(Number(u.output_tokens ?? 0))}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(metrics.input)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(metrics.output)}</td>
                     <td className="px-3 py-2 text-right tabular-nums">
-                      {(u.cost_usd || u.total_cost_usd)
-                        ? `$${Number(u.cost_usd ?? u.total_cost_usd ?? 0).toFixed(4)}`
+                      {metrics.cost > 0
+                        ? `$${metrics.cost.toFixed(4)}`
                         : "-"
                       }
                     </td>
@@ -2023,7 +2107,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
 
   const adapterInvokePayload = useMemo(() => {
     const evt = events.find((e) => e.eventType === "adapter.invoke");
-    return asRecord(evt?.payload ?? null);
+    return redactHomePathUserSegmentsInValue(asRecord(evt?.payload ?? null));
   }, [events]);
 
   const adapter = useMemo(() => getUIAdapter(adapterType), [adapterType]);
@@ -2096,8 +2180,8 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
               <div className="text-xs text-muted-foreground mb-1">Prompt</div>
               <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap">
                 {typeof adapterInvokePayload.prompt === "string"
-                  ? adapterInvokePayload.prompt
-                  : JSON.stringify(adapterInvokePayload.prompt, null, 2)}
+                  ? redactHomePathUserSegments(adapterInvokePayload.prompt)
+                  : JSON.stringify(redactHomePathUserSegmentsInValue(adapterInvokePayload.prompt), null, 2)}
               </pre>
             </div>
           )}
@@ -2105,7 +2189,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
             <div>
               <div className="text-xs text-muted-foreground mb-1">Context</div>
               <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap">
-                {JSON.stringify(adapterInvokePayload.context, null, 2)}
+                {JSON.stringify(redactHomePathUserSegmentsInValue(adapterInvokePayload.context), null, 2)}
               </pre>
             </div>
           )}
@@ -2189,14 +2273,14 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           {run.error && (
             <div className="text-xs text-red-600 dark:text-red-200">
               <span className="text-red-700 dark:text-red-300">Error: </span>
-              {run.error}
+              {redactHomePathUserSegments(run.error)}
             </div>
           )}
           {run.stderrExcerpt && run.stderrExcerpt.trim() && (
             <div>
               <div className="text-xs text-red-700 dark:text-red-300 mb-1">stderr excerpt</div>
               <pre className="bg-red-50 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap text-red-800 dark:text-red-100">
-                {run.stderrExcerpt}
+                {redactHomePathUserSegments(run.stderrExcerpt)}
               </pre>
             </div>
           )}
@@ -2204,7 +2288,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
             <div>
               <div className="text-xs text-red-700 dark:text-red-300 mb-1">adapter result JSON</div>
               <pre className="bg-red-50 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap text-red-800 dark:text-red-100">
-                {JSON.stringify(run.resultJson, null, 2)}
+                {JSON.stringify(redactHomePathUserSegmentsInValue(run.resultJson), null, 2)}
               </pre>
             </div>
           )}
@@ -2212,7 +2296,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
             <div>
               <div className="text-xs text-red-700 dark:text-red-300 mb-1">stdout excerpt</div>
               <pre className="bg-red-50 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap text-red-800 dark:text-red-100">
-                {run.stdoutExcerpt}
+                {redactHomePathUserSegments(run.stdoutExcerpt)}
               </pre>
             </div>
           )}
@@ -2238,7 +2322,11 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
                     {evt.stream ? `[${evt.stream}]` : ""}
                   </span>
                   <span className={cn("break-all", color)}>
-                    {evt.message ?? (evt.payload ? JSON.stringify(evt.payload) : "")}
+                    {evt.message
+                      ? redactHomePathUserSegments(evt.message)
+                      : evt.payload
+                        ? JSON.stringify(redactHomePathUserSegmentsInValue(evt.payload))
+                        : ""}
                   </span>
                 </div>
               );
