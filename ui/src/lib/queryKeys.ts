@@ -4,11 +4,23 @@ export const queryKeys = {
     detail: (id: string) => ["companies", id] as const,
     stats: ["companies", "stats"] as const,
   },
+  companySkills: {
+    list: (companyId: string) => ["company-skills", companyId] as const,
+    detail: (companyId: string, skillId: string) => ["company-skills", companyId, skillId] as const,
+    updateStatus: (companyId: string, skillId: string) =>
+      ["company-skills", companyId, skillId, "update-status"] as const,
+    file: (companyId: string, skillId: string, relativePath: string) =>
+      ["company-skills", companyId, skillId, "file", relativePath] as const,
+  },
   agents: {
     list: (companyId: string) => ["agents", companyId] as const,
     detail: (id: string) => ["agents", "detail", id] as const,
     runtimeState: (id: string) => ["agents", "runtime-state", id] as const,
     taskSessions: (id: string) => ["agents", "task-sessions", id] as const,
+    skills: (id: string) => ["agents", "skills", id] as const,
+    instructionsBundle: (id: string) => ["agents", "instructions-bundle", id] as const,
+    instructionsFile: (id: string, relativePath: string) =>
+      ["agents", "instructions-bundle", id, "file", relativePath] as const,
     keys: (agentId: string) => ["agents", "keys", agentId] as const,
     configRevisions: (agentId: string) => ["agents", "config-revisions", agentId] as const,
     adapterModels: (companyId: string, adapterType: string) =>
@@ -34,6 +46,18 @@ export const queryKeys = {
     approvals: (issueId: string) => ["issues", "approvals", issueId] as const,
     liveRuns: (issueId: string) => ["issues", "live-runs", issueId] as const,
     activeRun: (issueId: string) => ["issues", "active-run", issueId] as const,
+    workProducts: (issueId: string) => ["issues", "work-products", issueId] as const,
+  },
+  routines: {
+    list: (companyId: string) => ["routines", companyId] as const,
+    detail: (id: string) => ["routines", "detail", id] as const,
+    runs: (id: string) => ["routines", "runs", id] as const,
+    activity: (companyId: string, id: string) => ["routines", "activity", companyId, id] as const,
+  },
+  executionWorkspaces: {
+    list: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>
+      ["execution-workspaces", companyId, filters ?? {}] as const,
+    detail: (id: string) => ["execution-workspaces", "detail", id] as const,
   },
   projects: {
     list: (companyId: string) => ["projects", companyId] as const,
@@ -62,7 +86,9 @@ export const queryKeys = {
     session: ["auth", "session"] as const,
   },
   instance: {
+    generalSettings: ["instance", "general-settings"] as const,
     schedulerHeartbeats: ["instance", "scheduler-heartbeats"] as const,
+    experimentalSettings: ["instance", "experimental-settings"] as const,
   },
   health: ["health"] as const,
   secrets: {
@@ -93,9 +119,13 @@ export const queryKeys = {
   heartbeats: (companyId: string, agentId?: string) =>
     ["heartbeats", companyId, agentId] as const,
   runDetail: (runId: string) => ["heartbeat-run", runId] as const,
+  runWorkspaceOperations: (runId: string) => ["heartbeat-run", runId, "workspace-operations"] as const,
   liveRuns: (companyId: string) => ["live-runs", companyId] as const,
   runIssues: (runId: string) => ["run-issues", runId] as const,
   org: (companyId: string) => ["org", companyId] as const,
+  skills: {
+    available: ["skills", "available"] as const,
+  },
   plugins: {
     all: ["plugins"] as const,
     examples: ["plugins", "examples"] as const,
